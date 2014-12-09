@@ -101,9 +101,85 @@ public interface LuceneIndexConstants {
      */
     String PROP_NODE = "properties";
 
+    String INDEX_RULES = "indexRules";
+
     /**
      * Field boost factor
      */
     String FIELD_BOOST = "boost";
 
+    /**
+     * Property name defined explicitly. Mostly used in case of relative property names
+     */
+    String PROP_NAME = "name";
+
+    String PROP_IS_REGEX = "isRegexp";
+
+    String PROP_INDEX = "index";
+
+    String PROP_USE_IN_EXCERPT = "useInExcerpt";
+
+    String PROP_NODE_SCOPE_INDEX = "nodeScopeIndex";
+
+    String PROP_PROPERTY_INDEX = "propertyIndex";
+
+    String PROP_ANALYZED = "analyzed";
+
+    String RULE_INHERITED = "inherited";
+
+    String PROP_ORDERED = "ordered";
+
+    /**
+     * Integer property indicating that LuceneIndex should be
+     * used in compat mode to specific version
+     */
+    String COMPAT_MODE = "compatVersion";
+
+    /**
+     * Boolean property to indicate that LuceneIndex is being used in testMode
+     * and it should participate in every test
+     */
+    String TEST_MODE = "testMode";
+
+    String EVALUATE_PATH_RESTRICTION = "evaluatePathRestrictions";
+
+    /**
+     * Experimental config to restrict which property type gets indexed at
+     * property definition level. Mostly index rule level #INCLUDE_PROPERTY_TYPES
+     * should be sufficient
+     */
+    String PROP_INCLUDED_TYPE = "oak.experimental.includePropertyTypes";
+
+    /**
+     * Regex to allow inclusion of all immediate properties of the node
+     */
+    String REGEX_ALL_PROPS = "^[^\\/]*$";
+
+    /**
+     * Node name storing the aggregate rules
+     */
+    String AGGREGATES = "aggregates";
+
+    String AGG_PRIMARY_TYPE = "primaryType";
+
+    /**
+     * Name of property which stores the aggregate include pattern like <code>jcr:content/metadata</code>
+     */
+    String AGG_PATH = "path";
+
+    /**
+     * Limit for maximum number of reaggregates allowed. For example if there is an aggregate of nt:folder
+     * and it also includes nt:folder then aggregation would traverse down untill this limit is hit
+     */
+    String AGG_RECURSIVE_LIMIT = "reaggregateLimit";
+
+    /**
+     * Boolean property indicating that separate fulltext field should be created for
+     * node represented by this pattern
+     */
+    String AGG_RELATIVE_NODE = "relativeNode";
+
+    String COST_PER_ENTRY = "costPerEntry";
+
+    String COST_PER_EXECUTION = "costPerExecution";
 }

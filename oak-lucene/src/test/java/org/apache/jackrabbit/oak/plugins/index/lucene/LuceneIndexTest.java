@@ -17,17 +17,19 @@
 package org.apache.jackrabbit.oak.plugins.index.lucene;
 
 import java.io.File;
+import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+import javax.jcr.PropertyType;
 
 import static com.google.common.collect.ImmutableList.copyOf;
 import static com.google.common.collect.Iterators.transform;
+import static com.google.common.collect.Lists.newArrayList;
 import static com.google.common.collect.Sets.newHashSet;
 import static com.google.common.util.concurrent.MoreExecutors.sameThreadExecutor;
-import static javax.jcr.PropertyType.TYPENAME_STRING;
 import static junit.framework.Assert.assertEquals;
 import static junit.framework.Assert.assertFalse;
 import static junit.framework.Assert.assertTrue;
@@ -35,10 +37,11 @@ import static org.apache.jackrabbit.JcrConstants.JCR_SYSTEM;
 import static org.apache.jackrabbit.JcrConstants.NT_BASE;
 import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.INDEX_DEFINITIONS_NAME;
 import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.REINDEX_PROPERTY_NAME;
+import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.INDEX_RULES;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.PERSISTENCE_FILE;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.PERSISTENCE_NAME;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.PERSISTENCE_PATH;
-import static org.apache.jackrabbit.oak.plugins.index.lucene.util.LuceneIndexHelper.newLuceneIndexDefinition;
+import static org.apache.jackrabbit.oak.plugins.index.lucene.util.LuceneIndexHelper.newLucenePropertyIndexDefinition;
 import static org.apache.jackrabbit.oak.plugins.nodetype.NodeTypeConstants.JCR_NODE_TYPES;
 import static org.apache.jackrabbit.oak.plugins.nodetype.write.InitialContent.INITIAL_CONTENT;
 import static org.apache.jackrabbit.oak.spi.query.QueryIndex.AdvancedQueryIndex;
@@ -74,11 +77,9 @@ import com.google.common.collect.ImmutableSet;
 
 public class LuceneIndexTest {
 
-    private static final Analyzer analyzer = LuceneIndexConstants.ANALYZER;
-
     private static final EditorHook HOOK = new EditorHook(
             new IndexUpdateProvider(
-                    new LuceneIndexEditorProvider().with(analyzer)));
+                    new LuceneIndexEditorProvider()));
 
     private NodeState root = INITIAL_CONTENT;
 
@@ -89,8 +90,7 @@ public class LuceneIndexTest {
     @Test
     public void testLucene() throws Exception {
         NodeBuilder index = builder.child(INDEX_DEFINITIONS_NAME);
-        newLuceneIndexDefinition(index, "lucene",
-                ImmutableSet.of(TYPENAME_STRING));
+        newLucenePropertyIndexDefinition(index, "lucene", ImmutableSet.of("foo"), null);
 
         NodeState before = builder.getNodeState();
         builder.setProperty("foo", "bar");
@@ -100,12 +100,13 @@ public class LuceneIndexTest {
 
         IndexTracker tracker = new IndexTracker();
         tracker.update(indexed);
-        AdvancedQueryIndex queryIndex = new LuceneIndex(tracker, analyzer, null);
+        AdvancedQueryIndex queryIndex = new LucenePropertyIndex(tracker);
         FilterImpl filter = createFilter(NT_BASE);
         filter.restrictPath("/", Filter.PathRestriction.EXACT);
         filter.restrictProperty("foo", Operator.EQUAL,
                 PropertyValues.newString("bar"));
-        Cursor cursor = queryIndex.query(createPlan(filter), indexed);
+        List<IndexPlan>  plans = queryIndex.getPlans(filter, null, builder.getNodeState());
+        Cursor cursor = queryIndex.query(plans.get(0), indexed);
         assertTrue(cursor.hasNext());
         assertEquals("/", cursor.next().getPath());
         assertFalse(cursor.hasNext());
@@ -114,8 +115,7 @@ public class LuceneIndexTest {
     @Test
     public void testLuceneLazyCursor() throws Exception {
         NodeBuilder index = builder.child(INDEX_DEFINITIONS_NAME);
-        newLuceneIndexDefinition(index, "lucene",
-                ImmutableSet.of(TYPENAME_STRING));
+        newLucenePropertyIndexDefinition(index, "lucene", ImmutableSet.of("foo"), null);
 
         NodeState before = builder.getNodeState();
         builder.setProperty("foo", "bar");
@@ -130,11 +130,12 @@ public class LuceneIndexTest {
 
         IndexTracker tracker = new IndexTracker();
         tracker.update(indexed);
-        AdvancedQueryIndex queryIndex = new LuceneIndex(tracker, analyzer, null);
+        AdvancedQueryIndex queryIndex = new LucenePropertyIndex(tracker);
         FilterImpl filter = createFilter(NT_BASE);
         filter.restrictProperty("foo", Operator.EQUAL,
                 PropertyValues.newString("bar"));
-        Cursor cursor = queryIndex.query(createPlan(filter), indexed);
+        List<IndexPlan> plans = queryIndex.getPlans(filter, null, indexed);
+        Cursor cursor = queryIndex.query(plans.get(0), indexed);
 
         List<String> paths = copyOf(transform(cursor, new Function<IndexRow, String>() {
             public String apply(IndexRow input) {
@@ -148,8 +149,7 @@ public class LuceneIndexTest {
     @Test
     public void testLucene2() throws Exception {
         NodeBuilder index = builder.child(INDEX_DEFINITIONS_NAME);
-        newLuceneIndexDefinition(index, "lucene",
-                ImmutableSet.of(TYPENAME_STRING));
+        newLucenePropertyIndexDefinition(index, "lucene", ImmutableSet.of("foo"), null);
 
         NodeState before = builder.getNodeState();
         builder.setProperty("foo", "bar");
@@ -163,12 +163,13 @@ public class LuceneIndexTest {
 
         IndexTracker tracker = new IndexTracker();
         tracker.update(indexed);
-        AdvancedQueryIndex queryIndex = new LuceneIndex(tracker, analyzer, null);
+        AdvancedQueryIndex queryIndex = new LucenePropertyIndex(tracker);
         FilterImpl filter = createFilter(NT_BASE);
         // filter.restrictPath("/", Filter.PathRestriction.EXACT);
         filter.restrictProperty("foo", Operator.EQUAL,
                 PropertyValues.newString("bar"));
-        Cursor cursor = queryIndex.query(createPlan(filter), indexed);
+        List<IndexPlan> plans = queryIndex.getPlans(filter, null, indexed);
+        Cursor cursor = queryIndex.query(plans.get(0), indexed);
 
         assertTrue(cursor.hasNext());
         assertEquals("/a/b/c", cursor.next().getPath());
@@ -178,11 +179,15 @@ public class LuceneIndexTest {
         assertFalse(cursor.hasNext());
     }
 
+
     @Test
     public void testLucene3() throws Exception {
-        NodeBuilder index = builder.child(INDEX_DEFINITIONS_NAME);
-        newLuceneIndexDefinition(index, "lucene",
-                ImmutableSet.of(TYPENAME_STRING));
+        NodeBuilder index = newLucenePropertyIndexDefinition(builder.child(INDEX_DEFINITIONS_NAME),
+                "lucene", ImmutableSet.of("foo"), null);
+        NodeBuilder rules = index.child(INDEX_RULES);
+        NodeBuilder fooProp = rules.child("nt:base").child(LuceneIndexConstants.PROP_NODE).child("foo");
+        fooProp.setProperty(LuceneIndexConstants.PROP_PROPERTY_INDEX, true);
+        fooProp.setProperty(LuceneIndexConstants.PROP_INCLUDED_TYPE, PropertyType.TYPENAME_STRING);
 
         NodeState before = builder.getNodeState();
         builder.setProperty("foo", "bar");
@@ -197,12 +202,13 @@ public class LuceneIndexTest {
 
         IndexTracker tracker = new IndexTracker();
         tracker.update(indexed);
-        AdvancedQueryIndex queryIndex = new LuceneIndex(tracker, analyzer, null);
+        AdvancedQueryIndex queryIndex = new LucenePropertyIndex(tracker);
         FilterImpl filter = createFilter(NT_BASE);
         // filter.restrictPath("/", Filter.PathRestriction.EXACT);
         filter.restrictProperty("foo", Operator.EQUAL,
                 PropertyValues.newString("bar"));
-        Cursor cursor = queryIndex.query(createPlan(filter), indexed);
+        List<IndexPlan> plans = queryIndex.getPlans(filter, null, indexed);
+        Cursor cursor = queryIndex.query(plans.get(0), indexed);
 
         assertTrue(cursor.hasNext());
         assertEquals("/a", cursor.next().getPath());
@@ -210,16 +216,53 @@ public class LuceneIndexTest {
         assertFalse(cursor.hasNext());
     }
 
-    private FilterImpl createFilter(String nodeTypeName) {
-        NodeState system = root.getChildNode(JCR_SYSTEM);
-        NodeState types = system.getChildNode(JCR_NODE_TYPES);
-        NodeState type = types.getChildNode(nodeTypeName);
-        SelectorImpl selector = new SelectorImpl(type, nodeTypeName);
-        return new FilterImpl(selector, "SELECT * FROM [" + nodeTypeName + "]", new QueryEngineSettings());
+    @Test
+    public void testPathRestrictions() throws Exception {
+        NodeBuilder idx = newLucenePropertyIndexDefinition(builder.child(INDEX_DEFINITIONS_NAME),
+                "lucene", ImmutableSet.of("foo"), null);
+        idx.setProperty(LuceneIndexConstants.EVALUATE_PATH_RESTRICTION, true);
+
+        NodeState before = builder.getNodeState();
+        builder.setProperty("foo", "bar");
+        builder.child("a").setProperty("foo", "bar");
+        builder.child("a1").setProperty("foo", "bar");
+        builder.child("a").child("b").setProperty("foo", "bar");
+        builder.child("a").child("b").child("c").setProperty("foo", "bar");
+
+        NodeState after = builder.getNodeState();
+
+        NodeState indexed = HOOK.processCommit(before, after,CommitInfo.EMPTY);
+
+        IndexTracker tracker = new IndexTracker();
+        tracker.update(indexed);
+        AdvancedQueryIndex queryIndex = new LucenePropertyIndex(tracker);
+
+        FilterImpl filter = createTestFilter();
+        filter.restrictPath("/", Filter.PathRestriction.EXACT);
+        assertFilter(filter, queryIndex, indexed, ImmutableList.of("/"));
+
+        filter = createTestFilter();
+        filter.restrictPath("/", Filter.PathRestriction.DIRECT_CHILDREN);
+        assertFilter(filter, queryIndex, indexed, ImmutableList.of("/a", "/a1"));
+
+        filter = createTestFilter();
+        filter.restrictPath("/a", Filter.PathRestriction.DIRECT_CHILDREN);
+        assertFilter(filter, queryIndex, indexed, ImmutableList.of("/a/b"));
+
+        filter = createTestFilter();
+        filter.restrictPath("/a", Filter.PathRestriction.ALL_CHILDREN);
+        assertFilter(filter, queryIndex, indexed, ImmutableList.of("/a/b", "/a/b/c"));
+    }
+
+    private FilterImpl createTestFilter(){
+        FilterImpl filter = createFilter(NT_BASE);
+        filter.restrictProperty("foo", Operator.EQUAL, PropertyValues.newString("bar"));
+        return filter;
     }
 
     @Test
     public void testTokens() {
+        Analyzer analyzer = LuceneIndexConstants.ANALYZER;
         assertEquals(ImmutableList.of("parent", "child"),
                 LuceneIndex.tokenize("/parent/child", analyzer));
         assertEquals(ImmutableList.of("p1234", "p5678"),
@@ -257,9 +300,11 @@ public class LuceneIndexTest {
             }
         });
         builder = nodeStore.getRoot().builder();
+
+        //Also initialize the NodeType registry required for Lucene index to work
+        builder.setChildNode(JCR_SYSTEM, INITIAL_CONTENT.getChildNode(JCR_SYSTEM));
         NodeBuilder index = builder.child(INDEX_DEFINITIONS_NAME);
-        NodeBuilder idxb = newLuceneIndexDefinition(index, "lucene",
-                ImmutableSet.of(TYPENAME_STRING));
+        NodeBuilder idxb = newLucenePropertyIndexDefinition(index, "lucene", ImmutableSet.of("foo", "foo2"), null);
         idxb.setProperty(PERSISTENCE_NAME, PERSISTENCE_FILE);
         idxb.setProperty(PERSISTENCE_PATH, getIndexDir());
 
@@ -282,8 +327,7 @@ public class LuceneIndexTest {
     @Test
     public void luceneWithCopyOnReadDir() throws Exception{
         NodeBuilder index = builder.child(INDEX_DEFINITIONS_NAME);
-        newLuceneIndexDefinition(index, "lucene",
-                ImmutableSet.of(TYPENAME_STRING));
+        newLucenePropertyIndexDefinition(index, "lucene", ImmutableSet.of("foo", "foo2"), null);
 
         NodeState before = builder.getNodeState();
         builder.setProperty("foo", "bar");
@@ -308,8 +352,7 @@ public class LuceneIndexTest {
     @Test
     public void luceneWithCopyOnReadDirAndReindex() throws Exception{
         NodeBuilder index = builder.child(INDEX_DEFINITIONS_NAME);
-        newLuceneIndexDefinition(index, "lucene",
-                ImmutableSet.of(TYPENAME_STRING));
+        newLucenePropertyIndexDefinition(index, "lucene", ImmutableSet.of("foo", "foo2", "foo3"), null);
 
         //1. Create index in two increments
         NodeState before = builder.getNodeState();
@@ -361,17 +404,42 @@ public class LuceneIndexTest {
         }
     }
 
+    private FilterImpl createFilter(String nodeTypeName) {
+        NodeState system = root.getChildNode(JCR_SYSTEM);
+        NodeState types = system.getChildNode(JCR_NODE_TYPES);
+        NodeState type = types.getChildNode(nodeTypeName);
+        SelectorImpl selector = new SelectorImpl(type, nodeTypeName);
+        return new FilterImpl(selector, "SELECT * FROM [" + nodeTypeName + "]", new QueryEngineSettings());
+    }
 
     private void assertQuery(IndexTracker tracker, NodeState indexed, String key, String value){
-        AdvancedQueryIndex queryIndex = new LuceneIndex(tracker, analyzer, null);
+        AdvancedQueryIndex queryIndex = new LucenePropertyIndex(tracker);
         FilterImpl filter = createFilter(NT_BASE);
         filter.restrictPath("/", Filter.PathRestriction.EXACT);
         filter.restrictProperty(key, Operator.EQUAL,
                 PropertyValues.newString(value));
-        Cursor cursor = queryIndex.query(createPlan(filter), indexed);
+        List<IndexPlan> plans = queryIndex.getPlans(filter, null, indexed);
+        Cursor cursor = queryIndex.query(plans.get(0), indexed);
         assertTrue(cursor.hasNext());
         assertEquals("/", cursor.next().getPath());
         assertFalse(cursor.hasNext());
+    }
+
+    private static List<String> assertFilter(Filter filter, AdvancedQueryIndex queryIndex,
+                                             NodeState indexed, List<String> expected) {
+        List<IndexPlan> plans = queryIndex.getPlans(filter, null, indexed);
+        Cursor cursor = queryIndex.query(plans.get(0), indexed);
+
+        List<String> paths = newArrayList();
+        while (cursor.hasNext()) {
+            paths.add(cursor.next().getPath());
+        }
+        Collections.sort(paths);
+        for (String p : expected) {
+            assertTrue("Expected path " + p + " not found", paths.contains(p));
+        }
+        assertEquals("Result set size is different", expected.size(), paths.size());
+        return paths;
     }
 
     private String getIndexDir(){
@@ -379,12 +447,4 @@ public class LuceneIndexTest {
         dirs.add(dir);
         return dir.getAbsolutePath();
     }
-
-    private IndexPlan createPlan(Filter filter){
-        return new IndexPlan.Builder()
-                .setFilter(filter)
-                .setAttribute(LuceneIndex.ATTR_INDEX_PATH, "/oak:index/lucene")
-                .build();
-    }
-
 }

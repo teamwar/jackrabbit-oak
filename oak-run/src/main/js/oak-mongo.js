@@ -178,14 +178,88 @@ var oak = (function(global){
     api.removeDescendantsAndSelf = function(path) {
         var count = 0;
         var depth = pathDepth(path);
+        var id = depth + ":" + path;
+        // current node at path
+        var result = db.nodes.remove({_id: id});
+        count += result.nRemoved;
+        // might be a long path
+        result = db.nodes.remove(longPathQuery(path));
+        count += result.nRemoved;
+        // descendants
+        var prefix = path + "/";
+        depth++;
         while (true) {
-            var result = db.nodes.remove({_id: pathFilter(depth++, path)});
+            result = db.nodes.remove(longPathFilter(depth, prefix));
+            count += result.nRemoved;
+            result = db.nodes.remove({_id: pathFilter(depth++, prefix)});
+            count += result.nRemoved;
+            if (result.nRemoved == 0) {
+                break;
+            }
+        }
+        // descendants further down the hierarchy with long path
+        while (true) {
+            result = db.nodes.remove(longPathFilter(depth++, prefix));
             if (result.nRemoved == 0) {
                 break;
             }
             count += result.nRemoved;
         }
         return {nRemoved : count};
+    }
+
+    /**
+     * List all checkpoints.
+     */
+    api.listCheckpoints = function() {
+        var result = {};
+        var doc = db.settings.findOne({_id:"checkpoint"});
+        if (doc == null) {
+            print("No checkpoint document found.");
+            return;
+        }
+        var data = doc.data;
+        var r;
+        for (r in data) {
+            var rev = new Revision(r);
+            var exp;
+            if (data[r].charAt(0) == '{') {
+                exp = JSON.parse(data[r])["expires"];
+            } else {
+                exp = data[r];
+            }
+            result[r] = {created:rev.asDate(), expires:new Date(parseInt(exp, 10))};
+        }
+        return result;
+    }
+
+    /**
+     * Removes all checkpoints older than a given Revision.
+     */
+    api.removeCheckpointsOlderThan = function(rev) {
+        if (rev === undefined) {
+            print("No revision specified");
+            return;
+        }
+        var r = new Revision(rev);
+        var unset = {};
+        var cps = api.listCheckpoints();
+        var x;
+        var num = 0;
+        for (x in cps) {
+            if (r.isNewerThan(new Revision(x))) {
+                unset["data." + x] = "";
+                num++;
+            }
+        }
+        if (num > 0) {
+            var update = {};
+            update["$inc"] = {_modCount: 1};
+            update["$unset"] = unset;
+            return db.settings.update({_id:"checkpoint"}, update);
+        } else {
+            print("No checkpoint older than " + rev);
+        }
     }
 
     //~--------------------------------------------------< internal >
@@ -260,7 +334,11 @@ var oak = (function(global){
     }
 
     Revision.prototype.toReadableString = function () {
-        return this.rev + " (" + new Date(this.timestamp).toString() + ")"
+        return this.rev + " (" + this.asDate().toString() + ")"
+    }
+
+    Revision.prototype.asDate = function() {
+        return new Date(this.timestamp);
     }
 
     var pathDepth = function(path){
@@ -278,6 +356,20 @@ var oak = (function(global){
 
     var pathFilter = function (depth, prefix){
         return new RegExp("^"+ depth + ":" + prefix);
+    };
+
+    var longPathFilter = function (depth, prefix) {
+        var filter = {};
+        filter._id = new RegExp("^" + depth + ":h");
+        filter._path = new RegExp("^" + prefix);
+        return filter;
+    };
+
+    var longPathQuery = function (path) {
+        var query = {};
+        query._id = new RegExp("^" + pathDepth(path) + ":h");
+        query._path = path;
+        return query;
     };
 
     //http://stackoverflow.com/a/20732091/1035417

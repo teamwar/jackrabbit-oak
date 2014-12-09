@@ -39,7 +39,6 @@ import org.apache.jackrabbit.oak.api.ContentRepository;
 import org.apache.jackrabbit.oak.api.Tree;
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.plugins.index.IndexConstants;
-import org.apache.jackrabbit.oak.plugins.index.lucene.util.LuceneInitializerHelper;
 import org.apache.jackrabbit.oak.plugins.index.nodetype.NodeTypeIndexProvider;
 import org.apache.jackrabbit.oak.plugins.index.property.PropertyIndexEditorProvider;
 import org.apache.jackrabbit.oak.plugins.memory.PropertyStates;
@@ -49,7 +48,6 @@ import org.apache.jackrabbit.oak.spi.commit.Observer;
 import org.apache.jackrabbit.oak.spi.query.QueryIndexProvider;
 import org.apache.jackrabbit.oak.spi.security.OpenSecurityProvider;
 import org.apache.jackrabbit.util.ISO8601;
-import org.junit.Ignore;
 import org.junit.Test;
 
 import static com.google.common.collect.ImmutableSet.of;
@@ -85,7 +83,6 @@ public class LucenePropertyIndexTest extends AbstractQueryTest {
         LuceneIndexProvider provider = new LuceneIndexProvider();
         return new Oak()
                 .with(new InitialContent())
-                .with(new LuceneInitializerHelper("luceneGlobal", (Set<String>) null))
                 .with(new OpenSecurityProvider())
                 .with((QueryIndexProvider) provider)
                 .with((Observer) provider)
@@ -271,6 +268,34 @@ public class LucenePropertyIndexTest extends AbstractQueryTest {
     }
 
     @Test
+    public void determinePropTypeFromRestriction() throws Exception{
+        Tree idx = createIndex("test1", of("propa", "propb"));
+        //Do not provide type information
+        root.commit();
+
+        Tree test = root.getTree("/").addChild("test");
+        test.addChild("a").setProperty("propa", 10);
+        test.addChild("b").setProperty("propa", 20);
+        test.addChild("c").setProperty("propa", 30);
+        test.addChild("c").setProperty("propb", "foo");
+        test.addChild("d").setProperty("propb", "foo");
+        root.commit();
+
+        assertThat(explain("select [jcr:path] from [nt:base] where [propa] >= 20"), containsString("lucene:test1"));
+
+        assertQuery("select [jcr:path] from [nt:base] where [propa] >= 20", asList("/test/b", "/test/c"));
+        assertQuery("select [jcr:path] from [nt:base] where [propa] >= 20", asList("/test/b", "/test/c"));
+        assertQuery("select [jcr:path] from [nt:base] where [propa] = 20", asList("/test/b"));
+        assertQuery("select [jcr:path] from [nt:base] where [propa] <= 20", asList("/test/b", "/test/a"));
+        assertQuery("select [jcr:path] from [nt:base] where [propa] < 20", asList("/test/a"));
+        assertQuery("select [jcr:path] from [nt:base] where [propa] = 20 or [propa] = 10 ", asList("/test/b", "/test/a"));
+        assertQuery("select [jcr:path] from [nt:base] where [propa] > 10 and [propa] < 30", asList("/test/b"));
+        assertQuery("select [jcr:path] from [nt:base] where [propa] in (10,20)", asList("/test/b", "/test/a"));
+        assertQuery("select [jcr:path] from [nt:base] where propa is not null", asList("/test/a", "/test/b", "/test/c"));
+
+    }
+
+    @Test
     public void rangeQueriesWithDouble() throws Exception {
         Tree idx = createIndex("test1", of("propa", "propb"));
         Tree propIdx = idx.addChild(PROP_NODE).addChild("propa");
@@ -342,7 +367,6 @@ public class LucenePropertyIndexTest extends AbstractQueryTest {
         assertQuery("select [jcr:path] from [nt:base] where propa is not null", asList("/test/a", "/test/b", "/test/c"));
     }
 
-    @Ignore("OAK-2190")
     @Test
     public void likeQueriesWithString() throws Exception {
         Tree idx = createIndex("test1", of("propa", "propb"));
@@ -355,8 +379,12 @@ public class LucenePropertyIndexTest extends AbstractQueryTest {
         test.addChild("c").setProperty("propa", "humpy");
         root.commit();
 
-        assertQuery("select [jcr:path] from [nt:base] where propa like 'hum%'", asList("/test/a", "test/c"));
-        assertQuery("select [jcr:path] from [nt:base] where propa like '%ty'", asList("/test/a", "/test/b"));
+        assertQuery("select [jcr:path] from [nt:base] where propa like 'hum%'",
+            asList("/test/a", "/test/c"));
+        assertQuery("select [jcr:path] from [nt:base] where propa like '%ty'",
+            asList("/test/a", "/test/b"));
+        assertQuery("select [jcr:path] from [nt:base] where propa like '%ump%'",
+            asList("/test/a", "/test/b", "/test/c"));
     }
 
     @Test
@@ -394,6 +422,7 @@ public class LucenePropertyIndexTest extends AbstractQueryTest {
     public void indexDefinitionBelowRoot() throws Exception {
         Tree parent = root.getTree("/").addChild("test");
         Tree idx = createIndex(parent, "test1", of("propa", "propb"));
+        idx.setProperty(LuceneIndexConstants.EVALUATE_PATH_RESTRICTION, true);
         idx.addChild(PROP_NODE).addChild("propa");
         root.commit();
 
@@ -404,7 +433,21 @@ public class LucenePropertyIndexTest extends AbstractQueryTest {
         assertQuery("select [jcr:path] from [nt:base] as s where ISDESCENDANTNODE(s, '/test') and propa = 'a'", asList("/test/test2/a"));
     }
 
+    @Test
+    public void indexDefinitionBelowRoot2() throws Exception {
+        Tree parent = root.getTree("/").addChild("test");
+        Tree idx = createIndex(parent, "test1", of("propa", "propb"));
+        idx.setProperty(LuceneIndexConstants.EVALUATE_PATH_RESTRICTION, true);
+        idx.addChild(PROP_NODE).addChild("propa");
+        root.commit();
 
+        Tree test = parent.addChild("test2").addChild("test3");
+        test.addChild("a").setProperty("propa", "a");
+        root.commit();
+
+        assertQuery("select [jcr:path] from [nt:base] as s where ISDESCENDANTNODE(s, '/test/test2') and propa = 'a'",
+                asList("/test/test2/test3/a"));
+    }
     @Test
     public void sortQueriesWithLong() throws Exception {
         Tree idx = createIndex("test1", of("foo", "bar"));
@@ -668,12 +711,11 @@ public class LucenePropertyIndexTest extends AbstractQueryTest {
 
     @Test
     public void indexTimeFieldBoost() throws Exception {
-
         // Index Definition
         Tree idx = createIndex("test1", of("propa", "propb", "propc"));
         idx.setProperty(LuceneIndexConstants.FULL_TEXT_ENABLED, true);
+
         Tree propNode = idx.addChild(PROP_NODE);
-        root.commit();
 
         // property definition for index test1
         Tree propA = propNode.addChild("propa");
@@ -732,7 +774,6 @@ public class LucenePropertyIndexTest extends AbstractQueryTest {
         def.setProperty(REINDEX_PROPERTY_NAME, true);
         def.setProperty(LuceneIndexConstants.FULL_TEXT_ENABLED, false);
         def.setProperty(PropertyStates.createProperty(LuceneIndexConstants.INCLUDE_PROPERTY_NAMES, propNames, Type.STRINGS));
-        root.commit();
         return index.getChild(INDEX_DEFINITIONS_NAME).getChild(name);
     }
 

@@ -29,8 +29,8 @@ import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.plugins.index.IndexUpdateCallback;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
+import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.util.ISO8601;
-import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.SerialMergeScheduler;
@@ -46,13 +46,13 @@ public class LuceneIndexEditorContext {
     private static final Logger log = LoggerFactory
             .getLogger(LuceneIndexEditorContext.class);
 
-    private static IndexWriterConfig getIndexWriterConfig(Analyzer analyzer, IndexDefinition definition) {
+    private static IndexWriterConfig getIndexWriterConfig(IndexDefinition definition) {
         // FIXME: Hack needed to make Lucene work in an OSGi environment
         Thread thread = Thread.currentThread();
         ClassLoader loader = thread.getContextClassLoader();
         thread.setContextClassLoader(IndexWriterConfig.class.getClassLoader());
         try {
-            IndexWriterConfig config = new IndexWriterConfig(VERSION, analyzer);
+            IndexWriterConfig config = new IndexWriterConfig(VERSION, definition.getAnalyzer());
             config.setMergeScheduler(new SerialMergeScheduler());
             if (definition.getCodec() != null) {
                 config.setCodec(definition.getCodec());
@@ -63,11 +63,11 @@ public class LuceneIndexEditorContext {
         }
     }
 
-    private static Directory newIndexDirectory(NodeBuilder definition)
+    private static Directory newIndexDirectory(IndexDefinition indexDefinition, NodeBuilder definition)
             throws IOException {
         String path = definition.getString(PERSISTENCE_PATH);
         if (path == null) {
-            return new OakDirectory(definition.child(INDEX_DATA_CHILD_NAME), new IndexDefinition(definition));
+            return new OakDirectory(definition.child(INDEX_DATA_CHILD_NAME), indexDefinition);
         } else {
             // try {
             File file = new File(path);
@@ -103,20 +103,16 @@ public class LuceneIndexEditorContext {
 
     private boolean reindex;
 
-    LuceneIndexEditorContext(NodeBuilder definition, Analyzer analyzer, IndexUpdateCallback updateCallback) {
+    LuceneIndexEditorContext(NodeState root, NodeBuilder definition, IndexUpdateCallback updateCallback) {
         this.definitionBuilder = definition;
-        this.definition = new IndexDefinition(definitionBuilder);
-        this.config = getIndexWriterConfig(analyzer, this.definition);
+        this.definition = new IndexDefinition(root, definition);
+        this.config = getIndexWriterConfig(this.definition);
         this.indexedNodes = 0;
         this.updateCallback = updateCallback;
-    }
 
-    boolean includeProperty(String name) {
-        return definition.includeProperty(name);
-    }
-
-    boolean includePropertyType(int type){
-        return definition.includePropertyType(type);
+        if (this.definition.isOfOldFormat()){
+            IndexDefinition.updateDefinition(definition);
+        }
     }
 
     Parser getParser() {
@@ -125,7 +121,7 @@ public class LuceneIndexEditorContext {
 
     IndexWriter getWriter() throws IOException {
         if (writer == null) {
-            writer = new IndexWriter(newIndexDirectory(definitionBuilder), config);
+            writer = new IndexWriter(newIndexDirectory(definition, definitionBuilder), config);
         }
         return writer;
     }
@@ -156,6 +152,8 @@ public class LuceneIndexEditorContext {
 
     public void enableReindexMode(){
         reindex = true;
+        IndexFormatVersion version = IndexDefinition.determineVersionForFreshIndex(definitionBuilder);
+        definitionBuilder.setProperty(IndexDefinition.INDEX_VERSION, version.getVersion());
     }
 
     public long incIndexedNodes() {
@@ -169,25 +167,6 @@ public class LuceneIndexEditorContext {
 
     void indexUpdate() throws CommitFailedException {
         updateCallback.indexUpdate();
-    }
-
-    /**
-     * Checks if a given property should be stored in the lucene index or not
-     */
-    public boolean isStored(String name) {
-        return definition.isStored(name);
-    }
-
-    public boolean isFullTextEnabled() {
-        return definition.isFullTextEnabled();
-    }
-
-    public boolean skipTokenization(String propertyName){
-        return definition.skipTokenization(propertyName);
-    }
-
-    public int getPropertyTypes() {
-        return definition.getPropertyTypes();
     }
 
     public IndexDefinition getDefinition() {

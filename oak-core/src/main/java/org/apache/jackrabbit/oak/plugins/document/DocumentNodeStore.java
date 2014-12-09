@@ -114,11 +114,6 @@ public final class DocumentNodeStore
             Integer.getInteger("oak.documentMK.revisionAge", 60 * 1000);
 
     /**
-     * Enable background operations
-     */
-    private static final boolean ENABLE_BACKGROUND_OPS = Boolean.parseBoolean(System.getProperty("oak.documentMK.backgroundOps", "true"));
-
-    /**
      * How long to remember the relative order of old revision of all cluster
      * nodes, in milliseconds. The default is one hour.
      */
@@ -466,8 +461,6 @@ public final class DocumentNodeStore
                 clusterNodeInfo.dispose();
             }
             store.dispose();
-            unsavedLastRevisions.close();
-
             LOG.info("Disposed DocumentNodeStore with clusterNodeId: {}", clusterId);
 
             if (blobStore instanceof Closeable) {
@@ -932,33 +925,15 @@ public final class DocumentNodeStore
      * @param rev the commit revision
      * @param path the path
      * @param isNew whether this is a new node
-     * @param pendingLastRev whether the node has a pending _lastRev to write
-     * @param isBranchCommit whether this is from a branch commit
      * @param added the list of added child nodes
      * @param removed the list of removed child nodes
      * @param changed the list of changed child nodes.
      *
      */
     public void applyChanges(Revision rev, String path,
-                             boolean isNew, boolean pendingLastRev,
-                             boolean isBranchCommit, List<String> added,
+                             boolean isNew, List<String> added,
                              List<String> removed, List<String> changed,
                              DiffCache.Entry cacheEntry) {
-        LastRevTracker tracker = createTracker(rev);
-        if (disableBranches) {
-            if (pendingLastRev) {
-                tracker.track(path);
-            }
-        } else {
-            if (isBranchCommit) {
-                Revision branchRev = rev.asBranchRevision();
-                tracker = branches.getBranchCommit(branchRev);
-            }
-            if (isBranchCommit || pendingLastRev) {
-                // write back _lastRev with background thread
-                tracker.track(path);
-            }
-        }
         if (isNew) {
             DocumentNodeState.Children c = new DocumentNodeState.Children();
             Set<String> set = Sets.newTreeSet();
@@ -1295,6 +1270,28 @@ public final class DocumentNodeStore
         return writer.toString();
     }
 
+    /**
+     * Creates a tracker for the given commit revision.
+     *
+     * @param r a commit revision.
+     * @param isBranchCommit whether this is a branch commit.
+     * @return a _lastRev tracker for the given commit revision.
+     */
+    LastRevTracker createTracker(final @Nonnull Revision r,
+                                 final boolean isBranchCommit) {
+        if (isBranchCommit && !disableBranches) {
+            Revision branchRev = r.asBranchRevision();
+            return branches.getBranchCommit(branchRev);
+        } else {
+            return new LastRevTracker() {
+                @Override
+                public void track(String path) {
+                    unsavedLastRevisions.put(path, r);
+                }
+            };
+        }
+    }
+
     //------------------------< Observable >------------------------------------
 
     @Override
@@ -1364,14 +1361,39 @@ public final class DocumentNodeStore
 
     @Nonnull
     @Override
+    public String checkpoint(long lifetime, @Nonnull Map<String, String> properties) {
+        return checkpoints.create(lifetime, properties).toString();
+    }
+
+    @Nonnull
+    @Override
     public String checkpoint(long lifetime) {
-        return checkpoints.create(lifetime).toString();
+        Map<String, String> empty = Collections.emptyMap();
+        return checkpoint(lifetime, empty);
+    }
+
+    @Nonnull
+    @Override
+    public Map<String, String> checkpointInfo(@Nonnull String checkpoint) {
+        Revision r = Revision.fromString(checkpoint);
+        Checkpoints.Info info = checkpoints.getCheckpoints().get(r);
+        if (info == null) {
+            // checkpoint does not exist
+            return Collections.emptyMap();
+        } else {
+            return info.get();
+        }
     }
 
     @CheckForNull
     @Override
     public NodeState retrieve(@Nonnull String checkpoint) {
-        return getRoot(Revision.fromString(checkpoint));
+        Revision r = Revision.fromString(checkpoint);
+        if (checkpoints.getCheckpoints().containsKey(r)) {
+            return getRoot(r);
+        } else {
+            return null;
+        }
     }
 
     @Override
@@ -1410,9 +1432,6 @@ public final class DocumentNodeStore
         }
         if (simpleRevisionCounter != null) {
             // only when using timestamp
-            return;
-        }
-        if (!ENABLE_BACKGROUND_OPS) {
             return;
         }
         try {
@@ -1576,21 +1595,6 @@ public final class DocumentNodeStore
     }
 
     //-----------------------------< internal >---------------------------------
-
-    /**
-     * Creates a tracker for the given commit revision.
-     *
-     * @param r a commit revision.
-     * @return a _lastRev tracker for the given commit revision.
-     */
-    private LastRevTracker createTracker(final @Nonnull Revision r) {
-        return new LastRevTracker() {
-            @Override
-            public void track(String path) {
-                unsavedLastRevisions.put(path, r);
-            }
-        };
-    }
 
     private static void diffProperties(DocumentNodeState from,
                                        DocumentNodeState to,

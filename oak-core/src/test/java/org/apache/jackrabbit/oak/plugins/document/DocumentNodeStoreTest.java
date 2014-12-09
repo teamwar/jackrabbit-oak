@@ -48,6 +48,7 @@ import org.apache.jackrabbit.oak.spi.commit.EmptyHook;
 import org.apache.jackrabbit.oak.spi.state.ChildNodeEntry;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
+import org.apache.jackrabbit.oak.spi.state.NodeStore;
 import org.apache.jackrabbit.oak.stats.Clock;
 import org.junit.After;
 import org.junit.Test;
@@ -252,11 +253,9 @@ public class DocumentNodeStoreTest {
         String id = Utils.getIdFromPath("/foo/node");
         NodeDocument doc = docStore.find(Collection.NODES, id);
         assertNotNull("document with id " + id + " does not exist", doc);
-        assertTrue(!doc.getLastRev().isEmpty());
         id = Utils.getIdFromPath("/bar/node");
         doc = docStore.find(Collection.NODES, id);
         assertNotNull("document with id " + id + " does not exist", doc);
-        assertTrue(!doc.getLastRev().isEmpty());
 
         mk.dispose();
     }
@@ -392,30 +391,6 @@ public class DocumentNodeStoreTest {
         nodeStore1.dispose();
         nodeStore2.dispose();
         nodeStore3.dispose();
-    }
-
-    // OAK-1820
-    @Test
-    public void setLastRevOnCommitForNewNode() throws Exception {
-        DocumentNodeStore ns = new DocumentMK.Builder()
-                .setAsyncDelay(0).getNodeStore();
-        // add a first child node. this will set the children flag on root
-        // and move the commit root to the root
-        NodeBuilder builder = ns.getRoot().builder();
-        builder.child("foo");
-        ns.merge(builder, EmptyHook.INSTANCE, CommitInfo.EMPTY);
-
-        // the second time, the added node is also the commit root, this
-        // is the case we are interested in
-        builder = ns.getRoot().builder();
-        builder.child("bar");
-        ns.merge(builder, EmptyHook.INSTANCE, CommitInfo.EMPTY);
-
-        NodeDocument doc = ns.getDocumentStore().find(NODES,
-                Utils.getIdFromPath("/bar"));
-        assertEquals(1, doc.getLastRev().size());
-
-        ns.dispose();
     }
 
     @Test
@@ -639,6 +614,92 @@ public class DocumentNodeStoreTest {
         assertEquals(1, (int) inactive.keySet().iterator().next());
 
         ns2.dispose();
+    }
+
+    // OAK-2288
+    @Test
+    public void mergedBranchVisibility() throws Exception {
+        final DocumentNodeStore store = new DocumentMK.Builder()
+                .setAsyncDelay(0).getNodeStore();
+        DocumentStore docStore = store.getDocumentStore();
+
+        NodeBuilder builder1 = store.getRoot().builder();
+        builder1.child("test");
+        merge(store, builder1);
+
+        builder1 = store.getRoot().builder();
+        NodeBuilder node = builder1.getChildNode("test").child("node");
+        String id = Utils.getIdFromPath("/test/node");
+        int i = 0;
+        // force creation of a branch
+        while (docStore.find(NODES, id) == null) {
+            node.setProperty("foo", i++);
+        }
+
+        NodeDocument doc = docStore.find(NODES, id);
+        assertNotNull(doc);
+        Revision rev = doc.getLocalDeleted().firstKey();
+
+        merge(store, builder1);
+
+        // must not be visible at the revision of the branch commit
+        assertFalse(store.getRoot(rev).getChildNode("test").getChildNode("node").exists());
+
+        // must be visible at the revision of the merged branch
+        assertTrue(store.getRoot().getChildNode("test").getChildNode("node").exists());
+
+        store.dispose();
+    }
+
+    // OAK-2308
+    @Test
+    public void recoverBranchCommit() throws Exception {
+        Clock clock = new Clock.Virtual();
+        clock.waitUntil(System.currentTimeMillis());
+
+        MemoryDocumentStore docStore = new MemoryDocumentStore();
+
+        DocumentNodeStore store1 = new DocumentMK.Builder()
+                .setDocumentStore(docStore)
+                .setAsyncDelay(0).clock(clock).getNodeStore();
+
+        NodeBuilder builder = store1.getRoot().builder();
+        builder.child("test");
+        merge(store1, builder);
+        // make sure all _lastRevs are written back
+        store1.runBackgroundOperations();
+
+        builder = store1.getRoot().builder();
+        NodeBuilder node = builder.getChildNode("test").child("node");
+        String id = Utils.getIdFromPath("/test/node");
+        int i = 0;
+        // force creation of a branch
+        while (docStore.find(NODES, id) == null) {
+            node.setProperty("foo", i++);
+        }
+        merge(store1, builder);
+
+        // wait until lease expires
+        clock.waitUntil(clock.getTime() + store1.getClusterInfo().getLeaseTime() + 1000);
+        // run recovery for this store
+        LastRevRecoveryAgent agent = store1.getLastRevRecoveryAgent();
+        assertTrue(agent.isRecoveryNeeded());
+        agent.recover(store1.getClusterId());
+
+        // start a second store
+        DocumentNodeStore store2 = new DocumentMK.Builder()
+                .setDocumentStore(docStore)
+                .setAsyncDelay(0).clock(clock).getNodeStore();
+        // must see /test/node
+        assertTrue(store2.getRoot().getChildNode("test").getChildNode("node").exists());
+
+        store2.dispose();
+        store1.dispose();
+    }
+
+    private static void merge(NodeStore store, NodeBuilder root)
+            throws CommitFailedException {
+        store.merge(root, EmptyHook.INSTANCE, CommitInfo.EMPTY);
     }
 
     private static class TestHook extends EditorHook {

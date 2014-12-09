@@ -38,14 +38,12 @@ import org.apache.felix.scr.annotations.ReferencePolicy;
 import org.apache.felix.scr.annotations.ReferencePolicyOption;
 import org.apache.jackrabbit.oak.commons.PropertiesUtil;
 import org.apache.jackrabbit.oak.osgi.OsgiWhiteboard;
-import org.apache.jackrabbit.oak.plugins.index.aggregate.AggregateIndexProvider;
 import org.apache.jackrabbit.oak.plugins.index.aggregate.NodeAggregator;
 import org.apache.jackrabbit.oak.spi.commit.Observer;
 import org.apache.jackrabbit.oak.spi.query.QueryIndexProvider;
 import org.apache.jackrabbit.oak.spi.whiteboard.Registration;
 import org.apache.jackrabbit.oak.spi.whiteboard.Whiteboard;
 import org.apache.jackrabbit.oak.spi.whiteboard.WhiteboardExecutor;
-import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.util.InfoStream;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.ServiceRegistration;
@@ -67,19 +65,11 @@ public class LuceneIndexProviderService {
 
     private final Logger log = LoggerFactory.getLogger(getClass());
 
-    private final Analyzer defaultAnalyzer = LuceneIndexConstants.ANALYZER;
-
     @Reference(cardinality = ReferenceCardinality.OPTIONAL_UNARY,
             policyOption = ReferencePolicyOption.GREEDY,
             policy = ReferencePolicy.DYNAMIC
     )
     private NodeAggregator nodeAggregator;
-
-    @Reference(cardinality = ReferenceCardinality.OPTIONAL_UNARY,
-            policyOption = ReferencePolicyOption.GREEDY,
-            policy = ReferencePolicy.DYNAMIC
-    )
-    protected Analyzer analyzer;
 
     @Property(
             boolValue = false,
@@ -115,9 +105,7 @@ public class LuceneIndexProviderService {
         initializeLogging(config);
         initialize();
 
-        QueryIndexProvider aggregate = AggregateIndexProvider.wrap(indexProvider);
-
-        regs.add(bundleContext.registerService(QueryIndexProvider.class.getName(), aggregate, null));
+        regs.add(bundleContext.registerService(QueryIndexProvider.class.getName(), indexProvider, null));
         regs.add(bundleContext.registerService(Observer.class.getName(), indexProvider, null));
 
         oakRegs.add(registerMBean(whiteboard,
@@ -159,9 +147,6 @@ public class LuceneIndexProviderService {
         }
 
         indexProvider.setAggregator(nodeAggregator);
-
-        Analyzer analyzer = this.analyzer != null ? this.analyzer : defaultAnalyzer;
-        indexProvider.setAnalyzer(analyzer);
     }
 
     private void initializeLogging(Map<String, ?> config) {
@@ -212,16 +197,6 @@ public class LuceneIndexProviderService {
 
     protected void unbindNodeAggregator(NodeAggregator aggregator) {
         this.nodeAggregator = null;
-        initialize();
-    }
-
-    protected void bindAnalyzer(Analyzer analyzer) {
-        this.analyzer = analyzer;
-        initialize();
-    }
-
-    protected void unbindAnalyzer(Analyzer analyzer) {
-        this.analyzer = null;
         initialize();
     }
 }

@@ -53,8 +53,10 @@ import com.google.common.collect.AbstractIterator;
 import com.google.common.collect.Queues;
 import com.google.common.collect.Sets;
 
+import org.apache.jackrabbit.JcrConstants;
 import org.apache.jackrabbit.oak.api.PropertyValue;
 import org.apache.jackrabbit.oak.plugins.index.aggregate.NodeAggregator;
+import org.apache.jackrabbit.oak.plugins.index.lucene.IndexDefinition.IndexingRule;
 import org.apache.jackrabbit.oak.plugins.index.lucene.util.MoreLikeThisHelper;
 import org.apache.jackrabbit.oak.query.QueryEngineSettings;
 import org.apache.jackrabbit.oak.query.QueryImpl;
@@ -163,15 +165,10 @@ public class LuceneIndex implements AdvanceFulltextQueryIndex {
 
     protected final IndexTracker tracker;
 
-    private final Analyzer analyzer;
-
     private final NodeAggregator aggregator;
 
-    public LuceneIndex(
-            IndexTracker tracker, Analyzer analyzer,
-            NodeAggregator aggregator) {
+    public LuceneIndex(IndexTracker tracker, NodeAggregator aggregator) {
         this.tracker = tracker;
-        this.analyzer = analyzer;
         this.aggregator = aggregator;
     }
 
@@ -189,7 +186,7 @@ public class LuceneIndex implements AdvanceFulltextQueryIndex {
             return Collections.emptyList();
         }
 
-        String indexPath = new LuceneIndexLookup(rootState).getFullTextIndexPath(filter, tracker);
+        String indexPath = new LuceneIndexLookup(rootState).getOldFullTextIndexPath(filter, tracker);
         if (indexPath == null) { // unusable index
             return Collections.emptyList();
         }
@@ -200,24 +197,24 @@ public class LuceneIndex implements AdvanceFulltextQueryIndex {
             // "contains(a/x, 'hello') and contains(b/x, 'world')"
             return Collections.emptyList();
         }
-        String parent = relPaths.iterator().next();
-
-        // no relative properties
-        double cost = 10;
-        if (!parent.isEmpty()) {
-            // all relative properties have the same "parent", as in
-            // "contains(a/x, 'hello') and contains(a/y, 'world')" or
-            // "contains(a/x, 'hello') or contains(a/*, 'world')"
-            // TODO: proper cost calculation
-            // we assume this will cause more read operations,
-            // as we need to read the node and then the parent
-            cost = 15;
+        IndexNode node = tracker.acquireIndexNode(indexPath);
+        try{
+            if (node != null){
+                IndexDefinition defn = node.getDefinition();
+                return Collections.singletonList(planBuilder(filter)
+                        .setEstimatedEntryCount(defn.getFulltextEntryCount(node.getSearcher().getIndexReader().numDocs()))
+                        .setCostPerExecution(defn.getCostPerExecution())
+                        .setCostPerEntry(defn.getCostPerEntry())
+                        .setAttribute(ATTR_INDEX_PATH, indexPath)
+                        .build());
+            }
+            //No index node then no plan possible
+            return Collections.emptyList();
+        } finally {
+            if (node != null){
+                node.release();
+            }
         }
-        return Collections.singletonList(planBuilder(filter)
-                .setCostPerExecution(cost)
-                .setAttribute(ATTR_INDEX_PATH, indexPath)
-                .build());
-
     }
 
     @Override
@@ -245,7 +242,7 @@ public class LuceneIndex implements AdvanceFulltextQueryIndex {
             // we only restrict non-full-text conditions if there is
             // no relative property in the full-text constraint
             boolean nonFullTextConstraints = parent.isEmpty();
-            String planDesc = getQuery(filter, null, nonFullTextConstraints, analyzer, index.getDefinition()) + " ft:(" + ft + ")";
+            String planDesc = getQuery(filter, null, nonFullTextConstraints, index.getDefinition()) + " ft:(" + ft + ")";
             if (!parent.isEmpty()) {
                 planDesc += " parent:" + parent;
             }
@@ -331,7 +328,7 @@ public class LuceneIndex implements AdvanceFulltextQueryIndex {
                 try {
                     IndexSearcher searcher = indexNode.getSearcher();
                     Query query = getQuery(filter, searcher.getIndexReader(),
-                            nonFullTextConstraints, analyzer, indexNode.getDefinition());
+                            nonFullTextConstraints, indexNode.getDefinition());
                     TopDocs docs;
                     long time = System.currentTimeMillis();
                     if (lastDoc != null) {
@@ -438,8 +435,9 @@ public class LuceneIndex implements AdvanceFulltextQueryIndex {
      * @return the Lucene query
      */
     private static Query getQuery(Filter filter, IndexReader reader,
-            boolean nonFullTextConstraints, Analyzer analyzer, IndexDefinition indexDefinition) {
+            boolean nonFullTextConstraints, IndexDefinition indexDefinition) {
         List<Query> qs = new ArrayList<Query>();
+        Analyzer analyzer = indexDefinition.getAnalyzer();
         FullTextExpression ft = filter.getFullTextConstraint();
         if (ft == null) {
             // there might be no full-text constraint
@@ -451,7 +449,7 @@ public class LuceneIndex implements AdvanceFulltextQueryIndex {
         PropertyRestriction pr = filter.getPropertyRestriction(NATIVE_QUERY_FUNCTION);
         if (pr != null) {
             String query = String.valueOf(pr.first.getValue(pr.first.getType()));
-            QueryParser queryParser = new QueryParser(VERSION, "", analyzer);
+            QueryParser queryParser = new QueryParser(VERSION, "", indexDefinition.getAnalyzer());
             if (query.startsWith("mlt?")) {
                 String mltQueryString = query.replace("mlt?", "");
                 if (reader != null) {
@@ -529,6 +527,9 @@ public class LuceneIndex implements AdvanceFulltextQueryIndex {
             break;
         }
 
+        //Fulltext index definition used by LuceneIndex only works with old format
+        //which is not nodeType based. So just use the nt:base index
+        IndexingRule rule = indexDefinition.getApplicableIndexingRule(JcrConstants.NT_BASE);
         for (PropertyRestriction pr : filter.getPropertyRestrictions()) {
 
             if (pr.first == null && pr.last == null) {
@@ -538,7 +539,7 @@ public class LuceneIndex implements AdvanceFulltextQueryIndex {
             }
 
             // check excluded properties and types
-            if (isExcludedProperty(pr, indexDefinition)) {
+            if (isExcludedProperty(pr, rule)) {
                 continue;
             }
 
@@ -630,15 +631,16 @@ public class LuceneIndex implements AdvanceFulltextQueryIndex {
     }
 
     private static boolean isExcludedProperty(PropertyRestriction pr,
-            IndexDefinition definition) {
+            IndexingRule rule) {
         String name = pr.propertyName;
         if (name.contains("/")) {
             // lucene cannot handle child-level property restrictions
             return true;
         }
 
+        PropertyDefinition pd = rule.getConfig(name);
         // check name
-        if(!definition.includeProperty(name)){
+        if(pd == null || !pd.index){
             return true;
         }
 
@@ -652,11 +654,18 @@ public class LuceneIndex implements AdvanceFulltextQueryIndex {
             type = pr.list.get(0).getType().tag();
         }
         if (type != null) {
-            if (!definition.includePropertyType(type)) {
+            if (!includePropertyType(type, rule)) {
                 return true;
             }
         }
         return false;
+    }
+
+    private static boolean includePropertyType(int type, IndexingRule rule){
+        if(rule.propertyTypes < 0){
+            return false;
+        }
+        return (rule.propertyTypes & (1 << type)) != 0;
     }
 
     private static void addReferenceConstraint(String uuid, List<Query> qs,
